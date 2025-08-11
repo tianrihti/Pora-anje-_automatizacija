@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from openpyxl import load_workbook
-import win32com.client as win32
+import win32com.client
 import time
 import pythoncom
 import xlwings as xw
@@ -160,7 +160,7 @@ class ExcelAutomation:
     
     def step5_paste_to_brizganje(self, copied_data):
         try:
-            logger.info("Step 5: Pasting data into 'brizganje izracun' sheet")
+            logger.info("Step 5: Pasting data into 'brizganje izračun' sheet")
 
             # Load workbook
             wb = load_workbook(self.porocanje_file, keep_vba=True)
@@ -211,7 +211,7 @@ class ExcelAutomation:
             # Save the workbook
             wb.save(self.porocanje_file)
             wb.close()
-            logger.info("Successfully pasted values to 'brizganje izracun' sheet")
+            logger.info("Successfully pasted values to 'brizganje izračun' sheet")
 
         except Exception as e:
             logger.error(f"Error in Step 5: {e}")
@@ -229,15 +229,6 @@ class ExcelAutomation:
             
             logger.setLevel(logging.DEBUG)
             for row in range(7, 47): # Rows 7 to 46 inclusive
-                col_a = ws.cell(row=row, column=1).value  # Column A
-                col_l = ws.cell(row=row, column=12).value  # Column L
-                col_m = ws.cell(row=row, column=13).value  # Column M
-                col_x = ws.cell(row=row, column=24).value  # Column X
-                col_y = ws.cell(row=row, column=25).value  # Column Y
-
-                # Log what we’re reading:
-                logger.debug(f"Row {row}: A='{col_a}', L='{col_l}', M='{col_m}', X='{col_x}', Y='{col_y}'")
-
                 cell_a = ws.cell(row=row, column=1).value  # Column A
                 if not cell_a:
                     continue  # Skip if column A is empty
@@ -299,6 +290,127 @@ class ExcelAutomation:
                 except:
                     logger.warning(f"Failed to terminate Excel process: {proc.pid}")
 
+    def step7_process_saved_texts(self, saved_texts):
+        logger.info("Step 7: Processing saved texts")
+        excel = None
+        try:
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = False
+            wb = excel.Workbooks.Open(self.porocanje_file)
+            izbor_sheet = wb.Worksheets("izbor")
+            list2_sheet = wb.Worksheets("List2")
+            brizganje_izracun_sheet = wb.Worksheets("brizganje izračun")  # Add this line
+
+            for text in saved_texts:
+                logger.info(f"Processing text: {text}")
+
+                # a. Filter data in Izbor sheet manually
+                last_row = izbor_sheet.Cells(izbor_sheet.Rows.Count, "F").End(-4162).Row
+                filtered_data = []
+
+                for row in range(1, last_row + 1):
+                    cell_value = izbor_sheet.Cells(row, 27).Value  # Column AA
+                    if cell_value == text or row == 1:  # Include header row
+                        row_data = [izbor_sheet.Cells(row, col).Value for col in range(6, 14)]  # Columns F to M
+                        filtered_data.append(row_data)
+
+                # b. Clear List2 target range
+                last_row_list2 = list2_sheet.Cells(list2_sheet.Rows.Count, "T").End(-4162).Row
+                list2_sheet.Range(f"T2:AA{last_row_list2}").ClearContents()
+
+                # c. Paste filtered data into List2 sheet
+                for i, row_data in enumerate(filtered_data):
+                    for j, value in enumerate(row_data):
+                        list2_sheet.Cells(i + 1, 20 + j).Value = value  # Start from column T (20th column)
+
+                # d. Execute macro (gumb1)
+                excel.Run("sortiraj")
+
+                # Step 8: Copy processed data
+                self.step8_copy_processed_data(list2_sheet)
+
+                # Step 9: Paste as image in "brizganje izracun" sheet
+                self.step9_paste_as_image(brizganje_izracun_sheet, text)
+
+                excel.CutCopyMode = False  # Clear clipboard
+
+            wb.Save()
+            wb.Close()
+            excel.Quit()
+            logger.info("Step 7,8 and 9 completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error in Step 7: {e}")
+            raise
+        finally:
+            if excel:
+                try:
+                    excel.Quit()
+                except:
+                    pass
+            self.kill_excel_processes()
+    
+    def enable_macros(self, wb):
+        try:
+            # Check if there's a security alert
+            if wb.ReadOnly:
+                # Try to enable content
+                app = wb.Application
+                app.DisplayAlerts = False
+                app.EnableEvents = False
+                app.AutomationSecurity = 3  # msoAutomationSecurityForceDisable
+                app.Run("Auto_Open")  # This usually enables content
+                app.AutomationSecurity = 1  # msoAutomationSecurityLow
+        except Exception as e:
+            logger.error(f"Failed to enable macros: {e}")
+    
+    def step8_copy_processed_data(self, list2_sheet):
+        """Step 8: Copy processed data from List2 sheet"""
+        logger.info("Step 8: Copying processed data from List2")
+
+        # Find the last row with data in column C
+        last_row = 8  # Default to row 8
+        for row in range(9, 28):  # Check rows 9 and 10
+            if list2_sheet.Cells(row, 3).Value:  # Column C
+                last_row = row
+
+        # Construct the range to copy
+        range_to_copy = list2_sheet.Range(f"B1:L{last_row}")
+        range_to_copy.CopyPicture(Appearance=1, Format=2)  # Copy as picture
+
+        logger.info(f"Successfully copied range B1:L{last_row} from List2 as picture")
+
+    def step9_paste_as_image(self, brizganje_izracun_sheet, text):
+        """Step 9: Paste as image in 'brizganje izračun' sheet"""
+        logger.info(f"Step 9: Pasting as image for text '{text}'")
+
+        last_row_brizganje = brizganje_izracun_sheet.Cells(brizganje_izracun_sheet.Rows.Count, "A").End(-4162).Row
+        target_row = None
+        for row in range(1, last_row_brizganje + 1):
+            if brizganje_izracun_sheet.Cells(row, 1).Value == text:
+                target_row = row + 1  # Go one row below
+                break
+
+        if target_row:
+            # Delete existing shapes (images) in the target row
+            for shape in brizganje_izracun_sheet.Shapes:
+                if shape.TopLeftCell.Row == target_row:
+                    shape.Delete()
+        
+            target_cell = brizganje_izracun_sheet.Cells(target_row, 1)
+            brizganje_izracun_sheet.Paste(target_cell, Link=False)
+        
+            # Get the last pasted shape (which should be our image)
+            last_shape = brizganje_izracun_sheet.Shapes(brizganje_izracun_sheet.Shapes.Count)
+        
+            # Adjust row height to fit the image
+            image_height = last_shape.Height
+            brizganje_izracun_sheet.Rows(target_row).RowHeight = image_height
+        
+            logger.info(f"Successfully pasted image for text '{text}' at row {target_row} and adjusted row height")
+        else:
+            logger.warning(f"Could not find row for text '{text}' in 'brizganje izračun' sheet")
+
 
 if __name__ == "__main__":
     # Create automation instance
@@ -322,6 +434,9 @@ if __name__ == "__main__":
         automation.recalc_excel()
         # Run step 6
         saved_texts = automation.step6_analyze_brizganje()
+
+        # Run step 7
+        automation.step7_process_saved_texts(saved_texts)
     except Exception as e:
         logger.error((f"An error occurred: {e}"))
     finally:
