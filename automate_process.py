@@ -123,8 +123,16 @@ class ExcelAutomation:
                         target_col = col
                         date_found = True
                         logger.info(f"Found target date at column {col}")
+
+                        # Check if the cell below contains "Fiksno"
+                        fiksno_cell = ws.cell(row=5, column=col).value
+                        if fiksno_cell == "Fiksno":
+                            logger.info("Found 'Fiksno' below the target date")
+                        else:
+                            raise ValueError("Plan is not fixed yet")
+                        
                         break
-            
+        
             if not date_found:
                 raise ValueError(f"Target date {target_date.strftime('%Y-%m-%d')} not found in row 4")
             
@@ -171,11 +179,8 @@ class ExcelAutomation:
             # Get the target date
             """Get the target date based on the rules"""
             today = datetime.now()
-            if today.weekday() == 0:  # Monday
-                # Go back to Thursday
-                target_date = today - timedelta(days=4)
-            elif today.weekday() == 1:  # Tuesday
-                # Go back to Monday
+            if today.weekday() == 0 or today.weekday() == 1:  # Monday or Tuesday
+                # Go back to Thursday or Friday
                 target_date = today - timedelta(days=4)
             else:
                 # Go back to yesterday
