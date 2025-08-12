@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class ExcelAutomation:
     def __init__(self):
-        self.pregled_file = os.path.abspath('Pregled.xls')
+        self.pregled_file = os.path.abspath('43.xls')
         self.porocanje_file = os.path.abspath("poročanje proizvodnje2025.xlsm")
         self.plan_file = os.path.abspath("plan brizganja 2025 mesečni.xlsx")
 
@@ -139,7 +139,7 @@ class ExcelAutomation:
         logger.info(f"Step 4: Copying range from column {start_col}")
 
         try:
-            wb = load_workbook(self.plan_file, data_only=True)
+            wb = load_workbook(self.plan_file, data_only=True)  # Use data_only=True to get values
             ws = wb["plan"]
 
             copied_data = []  # Will store list of rows, each row is a list of 3 cell values
@@ -148,7 +148,7 @@ class ExcelAutomation:
                 row_data = []
                 for col_offset in range(3):  # Copy 3 columns: start_col, start_col+1, start_col+2
                     cell = ws.cell(row=row, column=start_col + col_offset)
-                    row_data.append(cell.value)
+                    row_data.append(cell.value)  # This will get the calculated value, not the formula
                 copied_data.append(row_data)
 
             logger.info(f"Copied range from column {start_col} to {start_col+2}, rows 6 to 44")
@@ -159,22 +159,27 @@ class ExcelAutomation:
             raise
     
     def step5_paste_to_brizganje(self, copied_data):
+        logger.info("Step 5: Pasting data into 'brizganje izračun' sheet")
         try:
-            logger.info("Step 5: Pasting data into 'brizganje izračun' sheet")
+            # Kill any existing Excel processes
+            self.kill_excel_processes()
 
             # Load workbook
             wb = load_workbook(self.porocanje_file, keep_vba=True)
             ws = wb["brizganje izračun"]
 
+            # Get the target date
             """Get the target date based on the rules"""
             today = datetime.now()
             if today.weekday() == 0:  # Monday
-                # Go back to Friday
+                # Go back to Thursday
+                target_date = today - timedelta(days=4)
+            elif today.weekday() == 1:  # Tuesday
+                # Go back to Monday
                 target_date = today - timedelta(days=4)
             else:
                 # Go back to yesterday
                 target_date = today - timedelta(days=2)
-
             logger.info(f"Looking for date: {target_date.strftime('%Y-%m-%d')}")
 
             # Search row 4, starting from column D (index 4)
@@ -202,16 +207,23 @@ class ExcelAutomation:
 
             logger.info(f"Pasting values into column {paste_col}")
 
+            # Clear the target range
+            clear_range = ws[f"{ws.cell(row=4, column=paste_col).column_letter}4:{ws.cell(row=4+len(copied_data), column=paste_col+2).column_letter}{4+len(copied_data)}"]
+            for row in clear_range:
+                for cell in row:
+                    cell.value = None
+
             # Paste copied_data into brizganje izracun sheet
             start_row = 4  # Assuming we start from row 4 (just like when copying)
             for i, row_data in enumerate(copied_data):
                 for j, value in enumerate(row_data):
                     ws.cell(row=start_row + i, column=paste_col + j, value=value)
-
+                    
             # Save the workbook
             wb.save(self.porocanje_file)
             wb.close()
             logger.info("Successfully pasted values to 'brizganje izračun' sheet")
+            return  # If successful, exit the function
 
         except Exception as e:
             logger.error(f"Error in Step 5: {e}")
@@ -260,35 +272,61 @@ class ExcelAutomation:
             raise
 
     def recalc_excel(self):
-        try:
-            app = xw.App(visible=False)
-            wb = app.books.open(self.porocanje_file)
-            wb.app.calculate()
-            wb.save()
-            wb.close()
-            app.quit()
-        except Exception as e:
-            logger.error(f"Error in recalc_excel: {e}")
-        finally:
+        max_retries = 3
+        retry_delay = 5  # seconds
+
+        for attempt in range(max_retries):
             try:
+                logger.info(f"Recalculating Excel (Attempt {attempt + 1})")
+                self.kill_excel_processes()  # Ensure no Excel processes are running
+
+                app = xw.App(visible=False)
+                wb = app.books.open(self.porocanje_file)
+                
+                logger.info("Calculating...")
+                wb.app.calculate()
+                
+                logger.info("Saving workbook...")
+                wb.save()
+                
+                logger.info("Closing workbook...")
+                wb.close()
+                
+                logger.info("Quitting Excel application...")
                 app.quit()
-            except:
-                pass
-            self.kill_excel_processes()
+                
+                logger.info("Excel recalculation completed successfully")
+                return  # If successful, exit the function
+
+            except Exception as e:
+                logger.error(f"Error in recalc_excel (Attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("Max retries reached. Unable to recalculate Excel.")
+                    raise
+            finally:
+                try:
+                    if 'app' in locals():
+                        app.quit()
+                except:
+                    pass
+                self.kill_excel_processes()
+
+        # If we've exhausted all retries, raise an exception
+        raise Exception("Failed to recalculate Excel after multiple attempts")
 
     def kill_excel_processes(self):
-        time.sleep(2)  # Wait for 2 seconds before killing processes
+        logger.info("Attempting to kill all Excel processes")
         for proc in psutil.process_iter(['name']):
-            if proc.info['name'] in ['EXCEL.EXE', 'excel.exe']:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=3)  # Wait for up to 3 seconds for the process to terminate
-                    logger.info(f"Terminated Excel process: {proc.pid}")
-                except psutil.TimeoutExpired:
-                    proc.kill()  # Force kill if it doesn't terminate
-                    logger.warning(f"Force killed Excel process: {proc.pid}")
-                except:
-                    logger.warning(f"Failed to terminate Excel process: {proc.pid}")
+            try:
+                if proc.info['name'].lower() in ['excel.exe', 'xlview.exe']:
+                    proc.kill()
+                    logger.info(f"Killed Excel process: {proc.pid}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        time.sleep(2)  # Wait for 2 seconds after killing processes
 
     def step7_process_saved_texts(self, saved_texts):
         logger.info("Step 7: Processing saved texts")
@@ -299,7 +337,13 @@ class ExcelAutomation:
             wb = excel.Workbooks.Open(self.porocanje_file)
             izbor_sheet = wb.Worksheets("izbor")
             list2_sheet = wb.Worksheets("List2")
-            brizganje_izracun_sheet = wb.Worksheets("brizganje izračun")  # Add this line
+            brizganje_izracun_sheet = wb.Worksheets("brizganje izračun")  
+            
+            # Delete all existing shapes (images) in the range A7:M44
+            for shape in brizganje_izracun_sheet.Shapes:
+                if (7 <= shape.TopLeftCell.Row <= 44 and 
+                    1 <= shape.TopLeftCell.Column <= 13): 
+                    shape.Delete()
 
             for text in saved_texts:
                 logger.info(f"Processing text: {text}")
@@ -333,6 +377,17 @@ class ExcelAutomation:
                 self.step9_paste_as_image(brizganje_izracun_sheet, text)
 
                 excel.CutCopyMode = False  # Clear clipboard
+
+            # Set the height of rows 7 to 44 to 16.5 if they don't contain an image
+            for row in range(7, 45):
+                has_image = False
+                for shape in brizganje_izracun_sheet.Shapes:
+                    if shape.TopLeftCell.Row == row:
+                        has_image = True
+                        break
+                if not has_image:
+                    brizganje_izracun_sheet.Rows(row).RowHeight = 16.5
+            logger.info("Adjusted heights of rows without images to 16.5")
 
             wb.Save()
             wb.Close()
@@ -392,22 +447,19 @@ class ExcelAutomation:
                 break
 
         if target_row:
-            # Delete existing shapes (images) in the target row
-            for shape in brizganje_izracun_sheet.Shapes:
-                if shape.TopLeftCell.Row == target_row:
-                    shape.Delete()
-        
             target_cell = brizganje_izracun_sheet.Cells(target_row, 1)
             brizganje_izracun_sheet.Paste(target_cell, Link=False)
-        
+    
             # Get the last pasted shape (which should be our image)
             last_shape = brizganje_izracun_sheet.Shapes(brizganje_izracun_sheet.Shapes.Count)
-        
+    
             # Adjust row height to fit the image
             image_height = last_shape.Height
             brizganje_izracun_sheet.Rows(target_row).RowHeight = image_height
-        
+    
             logger.info(f"Successfully pasted image for text '{text}' at row {target_row} and adjusted row height")
+            # Add this line to check if the shape is actually there
+            logger.info(f"Shape count after pasting: {brizganje_izracun_sheet.Shapes.Count}")
         else:
             logger.warning(f"Could not find row for text '{text}' in 'brizganje izračun' sheet")
 
@@ -416,6 +468,7 @@ if __name__ == "__main__":
     # Create automation instance
     automation = ExcelAutomation()
     try:
+        automation.kill_excel_processes()
         # Run step 1
         pregled_data = automation.step1_copy_pregled_data()
 
